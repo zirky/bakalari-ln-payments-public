@@ -18,7 +18,7 @@ Veškeré citlivé údaje musí být nastaveny jako **Secrets** (Tajné klíče)
 | `BAKALARI_USERNAME` | Uživatelské jméno pro přihlášení do Bakalářů. |
 | `BAKALARI_PASSWORD` | Heslo k účtu. |
 | `LNBITS_WITHDRAW_KEY` | Váš Withdraw API Key z LNBits peněženky. |
-| `LNBITS_HOST` | Adresa Vašeho LNBits serveru (např. `https://lndbits.cz/`). |
+| `LNBITS_HOST` | Adresa Vašeho LNBits serveru (např. `https://lnbits.cz/`). |
 | `SMTP_HOST` | Server pro odesílání e-mailů s fakturami. |
 | `SMTP_USER` | Uživatelské jméno pro odesílání e-mailů. |
 | `SMTP_PASS` | Heslo pro odesílání e-mailů. |
