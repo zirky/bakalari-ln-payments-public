@@ -34,14 +34,13 @@ const NOTIFICATION_EMAIL = process.env.NOTIFICATION_EMAIL;
 const SMTP_HOST = process.env.SMTP_HOST;
 const SMTP_USER = process.env.SMTP_USER;
 const SMTP_PASS = process.env.SMTP_PASS;
-const SMTP_PORT = process.env.SMTP_PORT || 465; // 💡 DOPLNĚNO PRO ROBUSTNOST
+const SMTP_PORT = process.env.SMTP_PORT || 465; 
 
 
 // 💡 KONSTANTY PRO GITHUB VARIABLES PERSISTENCE
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const REPO_SLUG = process.env.GITHUB_REPOSITORY; // např. "zirky/bakalari-ln-payout"
-const STATE_VARIABLE_NAME = 'BAKALARI_STATE'; // Jméno proměnné v repozitáři
-// Získáme majitele a jméno repozitáře z proměnné prostředí
+const REPO_SLUG = process.env.GITHUB_REPOSITORY;
+const STATE_VARIABLE_NAME = 'BAKALARI_STATE';
 const [REPO_OWNER, REPO_NAME] = (REPO_SLUG || '/').split('/'); 
 
 
@@ -52,9 +51,15 @@ if (!LNBITS_WITHDRAW_KEY || !BAKALARI_USERNAME || !BAKALARI_PASSWORD || !EXCHANG
 }
 let transporter;
 if (SMTP_HOST) {
+    // 💡 Zajištění správné konverze portu
+    const port = parseInt(SMTP_PORT);
+    if (isNaN(port)) {
+         console.error("🔴 CHYBA: SMTP_PORT není platné číslo.");
+         process.exit(1);
+    }
     transporter = nodemailer.createTransport({
         host: SMTP_HOST,
-        port: parseInt(SMTP_PORT), 
+        port: port, 
         secure: true, 
         auth: { user: SMTP_USER, pass: SMTP_PASS }
     });
@@ -66,7 +71,6 @@ async function findWorkingEndpoint(baseUrl) {
     const possiblePrefixes = [
         '', '/bakalari', '/bakaweb', '/webrodice', '/dm', '/mobile'
     ];
-
     console.log(`DIAGNOSTIKA: Hledám funkční API endpoint na ${baseUrl}...`);
 
     for (const prefix of possiblePrefixes) {
@@ -82,6 +86,7 @@ async function findWorkingEndpoint(baseUrl) {
                 headers: { 'Content-Type': 'application/x-www-form-urlencoded' }
             });
         } catch (error) {
+            // Bakaláři vrátí 400/401 pro neúspěšný pokus (dobře), ale 404 pro špatnou cestu.
             if (error.response && (error.response.status === 400 || error.response.status === 401)) {
                 const foundApiBase = `${baseUrl}${prefix}/api`;
                 console.log(`✅ NALEZEN FUNKČNÍ ENDPOINT: ${foundApiBase}`);
@@ -106,11 +111,11 @@ async function authenticateBakalari(username, password, apiBaseUrl) {
         });
         return response.data?.access_token;
     } catch (error) {
-        throw new Error(`Přihlášení selhalo: ${error.message}`);
+        throw new Error(`Přihlášení selhalo: ${error.message}. Kód chyby: ${error.response?.status || 'N/A'}`);
     }
 }
 
-async function fetchMarksViaApi(lastCheckDate) {
+async function fetchMarksViaApi(filterDate) {
     console.log(`DIAGNOSTIKA: Spouštím proces získání známek...`);
     
     const apiBaseUrl = await findWorkingEndpoint(BAKALARI_BASE_URL);
@@ -130,7 +135,8 @@ async function fetchMarksViaApi(lastCheckDate) {
         
         subjects.forEach(subject => {
             const subjectName = subject.Caption || subject.Name || subject.SubjectName || 'Neznámý předmět'; 
-            (subject.Marks || []).forEach(mark => processMark(mark, subjectName, lastCheckDate, newMarks));
+            // 💡 Předáváme filterDate do processMark
+            (subject.Marks || []).forEach(mark => processMark(mark, subjectName, filterDate, newMarks));
         });
         
         console.log(`DIAGNOSTIKA: Nalezeno ${newMarks.length} nových známek.`);
@@ -142,10 +148,12 @@ async function fetchMarksViaApi(lastCheckDate) {
     }
 }
 
-function processMark(mark, subjectName, lastCheckDate, collection) {
+// 💡 Přejmenováno pro lepší pochopení
+function processMark(mark, subjectName, filterDate, collection) {
     const markDate = new Date(mark.Date || mark.MarkDate); 
     
-    if (markDate > lastCheckDate && mark.MarkText) {
+    // Zahrnuje známky striktně NOVĚJŠÍ než datum poslední kontroly
+    if (markDate > filterDate && mark.MarkText) {
         collection.push({
             date: markDate,
             value: mark.MarkText.trim(),
@@ -155,12 +163,17 @@ function processMark(mark, subjectName, lastCheckDate, collection) {
 }
 
 
-// --- 4. FUNKCE PRO PERSISTENCI STAVU (NOVÉ) ---
+// --- 4. FUNKCE PRO PERSISTENCI STAVU (GITHUB) ---
 
 async function loadStateFromVariable() {
     console.log(`DIAGNOSTIKA: Pokouším se načíst stav z GitHub Variable...`);
     
     const apiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/variables/${STATE_VARIABLE_NAME}`;
+
+    if (!GITHUB_TOKEN) {
+        console.warn('⚠️ CHYBA: GITHUB_TOKEN není nastaven. Nelze načíst stav. Používám výchozí stav.');
+        return { last_checked: START_DATE_ENV, running_balance_czk: 0 };
+    }
 
     try {
         const response = await axios.get(apiUrl, {
@@ -170,12 +183,11 @@ async function loadStateFromVariable() {
             }
         });
         
-        const stateJson = response.data.value; // Získá JSON string
+        const stateJson = response.data.value; 
         console.log(`✅ Stav úspěšně načten z Variable.`);
         return JSON.parse(stateJson);
 
     } catch (error) {
-        // Vracíme defaultní stav, pokud Variable neexistuje nebo je chyba v tokenu
         console.warn(`⚠️ CHYBA PŘI NAČÍTÁNÍ STAVU: ${error.message}. Spouštím s výchozím datem.`);
         return {
             last_checked: START_DATE_ENV,
@@ -187,8 +199,12 @@ async function loadStateFromVariable() {
 async function saveStateToVariable(state) {
     console.log(`DIAGNOSTIKA: Ukládám stav do GitHub Variable...`);
     const apiUrl = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/actions/variables/${STATE_VARIABLE_NAME}`;
+
+    if (!GITHUB_TOKEN) {
+        console.error('🔴 KRITICKÁ CHYBA: GITHUB_TOKEN není nastaven. Stav nebyl uložen!');
+        throw new Error("Kritická chyba: GITHUB_TOKEN není nastaven. Nepodařilo se uložit stav.");
+    }
     
-    // Ukládáme jako jednoduchý JSON string
     const data = {
         name: STATE_VARIABLE_NAME,
         value: JSON.stringify(state)
@@ -205,7 +221,6 @@ async function saveStateToVariable(state) {
         console.log(`✅ Nový stav uložen do GitHub Variable.`);
     } catch (error) {
         console.error('🔴 CHYBA PŘI UKLÁDÁNÍ STAVU DO VARIABLES:', error.message);
-        // Kritická chyba: V tomto bodě by skript měl selhat, aby se neztratil stav.
         throw new Error("Kritická chyba: Nepodařilo se uložit stav do Variables.");
     }
 }
@@ -243,6 +258,7 @@ async function getBtcPerCzk() {
         return czkRate;
     } catch (error) {
         console.error('🔴 CHYBA ZÍSKÁNÍ KURZU:', error.message);
+        // Návrat k defaultní hodnotě v případě chyby, jak bylo zamýšleno
         return 1500000; 
     }
 }
@@ -362,7 +378,7 @@ async function main() {
         console.log(`DIAGNOSTIKA: Načten stav: Datum kontroly od ${lastCheckDate.toISOString()}, Zůstatek: ${runningBalanceCzk.toFixed(2)} CZK.`);
 
 
-        // Přidáme malou rezervu (1ms), aby se známky zapsané v přesně stejnou dobu při novém běhu neopakovaly
+        // Přidání 1ms k datu poslední kontroly zajišťuje, že se nebudou znovu načítat známky s přesně stejným časem
         const filterDate = new Date(lastCheckDate.getTime() + 1); 
 
         const marksData = await fetchMarksViaApi(filterDate);
@@ -372,7 +388,7 @@ async function main() {
 
         if (marksData.marks.length === 0) {
             console.log("DIAGNOSTIKA: Žádné nové známky k proplacení.");
-            // 💡 Ukládáme stávající dluh/zůstatek a aktuální čas kontroly (newCheckDate)
+            // Ukládáme stávající dluh/zůstatek a aktuální čas kontroly (newCheckDate)
             await saveStateToVariable({ 
                 last_checked: newCheckDate.toISOString(), 
                 running_balance_czk: runningBalanceCzk 
@@ -381,13 +397,12 @@ async function main() {
         }
 
         // 3. KRITICKÁ KROK: VÝPOČET NOVÉHO CELKOVÉHO ZŮSTATKU
-        // Zde se provádí kompenzace dluhu/kreditu
         const newRunningBalance = runningBalanceCzk + czkChangeFromMarks;
         let paymentAmountCzk = 0;
         let balanceToSave = newRunningBalance; // Nový zůstatek se defaultně uloží
 
         if (newRunningBalance > 0) {
-            // Zůstatek je kladný -> proplatíme ho celý (dluh je kompenzován)
+            // Zůstatek je kladný -> proplatíme ho celý
             paymentAmountCzk = newRunningBalance;
             balanceToSave = 0; // Po úspěšné platbě bude zůstatek nula
             console.log(`DIAGNOSTIKA: Původní: ${runningBalanceCzk.toFixed(2)} CZK. Nová změna: ${czkChangeFromMarks.toFixed(2)} CZK. Celková odměna k platbě: ${paymentAmountCzk.toFixed(2)} CZK.`);
@@ -413,15 +428,15 @@ async function main() {
         
         // 6. ATOMICKÉ ULOŽENÍ STAVU PO ÚSPĚŠNÉ PLATBĚ
         if (voucherResult.success) {
-            // Ukládáme stav, kde je running_balance_czk vynulován (balanceToSave je 0 v tomto bloku)
+            // Ukládáme stav, kde je running_balance_czk vynulován
             await saveStateToVariable({ 
                 last_checked: newCheckDate.toISOString(), 
                 running_balance_czk: balanceToSave 
             });
             console.log('DIAGNOSTIKA: Automatizace dokončena. Datum kontroly a zůstatek aktualizovány.');
         } else {
-            // ⚠️ KRITICKÉ: Pokud platba selže, NEUKLÁDÁME ZMĚNĚNÝ STAV. 
-            // Running_balance_czk zůstane vysoký (kladný), aby se vyplatil při příštím spuštění.
+            // Kritické: Pokud platba selže, NEUKLÁDÁME ZMĚNĚNÝ STAV. 
+            // Původní kladný zůstatek zůstane v paměti a bude zkuseno znovu.
             console.error('🔴 KRITICKÁ CHYBA: Platba selhala, stav NEBYL uložen. Bude zkuseno znovu v dalším běhu.');
         }
         
@@ -435,4 +450,10 @@ async function main() {
 const computeCzkAmountFromMarks = computeCzkChangeFromMarks; 
 
 // --- SPUŠTĚNÍ ---
-if (require.main === module) main();
+if (require.main === module) {
+    // 💡 Používáme .catch() pro zachycení nekonečných chyb v asynchronní main funkci
+    main().catch(error => {
+        console.error("🔴 NEKONEČNÁ CHYBA SKRIPTU:", error.message || error);
+        process.exit(1);
+    });
+}
